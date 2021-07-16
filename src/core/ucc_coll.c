@@ -143,6 +143,7 @@ UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_init,
         return status;
     } else if (ucc_unlikely(status < 0)) {
         ucc_error("failed to init collective: %s", ucc_status_string(status));
+        while(1);
         return status;
     }
     if (coll_args->mask & UCC_COLL_ARGS_FIELD_CB) {

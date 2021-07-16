@@ -97,8 +97,9 @@ extern ucc_mc_cuda_t ucc_mc_cuda;
 #define CUDACHECK(cmd) do {                                                    \
         cudaError_t e = cmd;                                                   \
         if(e != cudaSuccess) {                                                 \
-            mc_error(&ucc_mc_cuda.super, "cuda failed with ret:%d(%s)", e,     \
+            mc_error(&ucc_mc_cuda.super, "cuda failed with ret:%d(%s)\n ", e,     \
                      cudaGetErrorString(e));                                   \
+            while(1); \
             return UCC_ERR_NO_MESSAGE;                                         \
         }                                                                      \
 } while(0)
