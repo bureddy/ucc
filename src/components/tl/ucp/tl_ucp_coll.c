@@ -125,6 +125,16 @@ static ucc_status_t ucc_tl_ucp_ee_wait_for_event_trigger(ucc_coll_task_t *coll_t
     }
 
     if (task->super.ee_task == NULL) {
+        /*
+         * run early triggered post if it's there
+         * currently only alltoallv supports it and skip for all other collectives
+         */
+        if (coll_task->triggered_task->early_triggered_post) {
+            coll_task->triggered_task->ee = task->super.ee;
+            status = coll_task->triggered_task->early_triggered_post(coll_task->triggered_task);
+            assert(status == UCC_OK);
+        }
+
         status = ucc_mc_ee_task_post(task->super.ee->ee_context,
                                      task->super.ee->ee_type, &task->super.ee_task);
         if (ucc_unlikely(status != UCC_OK)) {
@@ -145,17 +155,6 @@ static ucc_status_t ucc_tl_ucp_ee_wait_for_event_trigger(ucc_coll_task_t *coll_t
         post_event->ev_context_size = 0;
         post_event->req = &coll_task->triggered_task->super;
         ucc_ee_set_event_internal(coll_task->ee, post_event, &coll_task->ee->event_out_queue);
-
-/*
-* run early triggered post if it's there
-* currently only alltoallv supports it and skip for all other collectives
-*/
-        if (coll_task->triggered_task->early_triggered_post) {
-            coll_task->triggered_task->ee = task->super.ee;
-            status = coll_task->triggered_task->early_triggered_post(coll_task->triggered_task);
-            assert(status == UCC_OK);
-        }
-
     }
 
     if (task->super.ee_task == NULL ||
