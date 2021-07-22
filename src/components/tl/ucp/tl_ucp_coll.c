@@ -107,6 +107,7 @@ static ucc_status_t ucc_tl_ucp_ee_wait_for_event_trigger(ucc_coll_task_t *coll_t
     ucc_status_t status;
     ucc_ev_t *ev;
     ucc_tl_ucp_task_t *task = ucc_derived_of(coll_task, ucc_tl_ucp_task_t);
+    ucc_tl_ucp_team_t *team = task->team;
 
     if (task->super.ev == NULL) {
         if (task->super.ee->ee_type == UCC_EE_CUDA_STREAM) {
@@ -129,16 +130,33 @@ static ucc_status_t ucc_tl_ucp_ee_wait_for_event_trigger(ucc_coll_task_t *coll_t
          * run early triggered post if it's there
          * currently only alltoallv supports it and skip for all other collectives
          */
+        if (UCC_TL_UCP_TEAM_CTX(team)->cfg.alltoallv_ipc_overlap) {
+            status = ucc_mc_ee_task_enqueue(task->super.ee->ee_context,
+                                            task->super.ee->ee_type,
+                                            &task->super.ee_task);
+            if (ucc_unlikely(status != UCC_OK)) {
+                tl_error(task->team->super.super.context->lib, "error in ee task enqueue");
+                task->super.super.status = status;
+                return status;
+            }
+        }
         if (coll_task->triggered_task->early_triggered_post) {
             coll_task->triggered_task->ee = task->super.ee;
             status = coll_task->triggered_task->early_triggered_post(coll_task->triggered_task);
             assert(status == UCC_OK);
         }
 
-        status = ucc_mc_ee_task_post(task->super.ee->ee_context,
-                                     task->super.ee->ee_type, &task->super.ee_task);
+
+        if (UCC_TL_UCP_TEAM_CTX(team)->cfg.alltoallv_ipc_overlap) {
+            status = ucc_mc_ee_task_sync(task->super.ee_task,
+                                         task->super.ee->ee_type);
+        } else {
+            status = ucc_mc_ee_task_post(task->super.ee->ee_context,
+                                         task->super.ee->ee_type,
+                                         &task->super.ee_task);
+        }
         if (ucc_unlikely(status != UCC_OK)) {
-            tl_error(task->team->super.super.context->lib, "error in ee task post");
+            tl_error(task->team->super.super.context->lib, "error in ee task sync/post");
             task->super.super.status = status;
             return status;
         }

@@ -96,6 +96,7 @@ typedef struct ucc_tl_ucp_context_config {
     uint32_t                pre_reg_mem;
     uint32_t                alltoall_use_ipc;
     size_t                  alltoallv_ipc_thresh;
+    uint32_t                alltoallv_ipc_overlap;
 } ucc_tl_ucp_context_config_t;
 
 typedef struct ucc_tl_ucp_lib {
