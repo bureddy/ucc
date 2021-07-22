@@ -166,11 +166,11 @@ ucs_status_t ucc_tl_ucp_alltoallv_cuda_ipc_setup(ucc_coll_task_t *coll_task)
 
     __sync_synchronize();
     asm volatile("": : :"memory");
-    my_info->seq_num = (task->tag + 1);
+    my_info->seq_num[0] = (task->tag + 1);
 
     for (j = 0; j < NODE_GROUP_SIZE; j++) {
         volatile mem_info_t *pi = peer_info;
-        while (pi[j].seq_num != (task->tag + 1));
+        while (pi[j].seq_num[0] != (task->tag + 1));
     }
     for (i=intra_rank_start,j = 0 ; i <= intra_rank_end; i++, j++) {
         if (i != team->rank && peer_info[j].d_ptr &&
@@ -264,11 +264,11 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_early_triggered_post(ucc_coll_task_t 
 
     __sync_synchronize();
     asm volatile("": : :"memory");
-    my_info->seq_num = (task->tag + 2);
+    my_info->seq_num[1] = (task->tag + 1);
 
     for (j = 0; j < NODE_GROUP_SIZE; j++) {
         volatile mem_info_t *pi = peer_info;
-        while (pi[j].seq_num != (task->tag + 2));
+        while (pi[j].seq_num[1] != (task->tag + 1));
     }
 
     for (i=intra_rank_start,j = 0 ; i <= intra_rank_end; i++, j++) {

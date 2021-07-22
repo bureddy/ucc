@@ -65,7 +65,7 @@ typedef struct {
     cudaIpcEventHandle_t ev_handle;
     size_t offset;
     size_t displ[INTRA_PPN];
-    uint32_t seq_num;
+    uint32_t seq_num[2];
 } mem_info_t;
 
 

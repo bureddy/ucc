@@ -105,13 +105,14 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
     {
         int shm_id = 0;
         int *shm_ids = ucc_malloc(team->size*sizeof(int), "shm_ids");
+        size_t control_size = NODE_GROUP_SIZE * MAX_ALLTOALLV_CONCURRENT * sizeof(mem_info_t);
+
         if (!shm_ids) {
             tl_error(tl_team->context->lib, "failed to alloc shmids");
             return UCC_ERR_NO_MEMORY;
 
         }
         if (IS_NODE_LEADER(team)) {
-            size_t control_size = NODE_GROUP_SIZE * MAX_ALLTOALLV_CONCURRENT * sizeof(mem_info_t);
             shm_id = shmget(IPC_PRIVATE, control_size, IPC_CREAT | 0666);
             if (shm_id < 0) {
                 tl_error(tl_team->context->lib, "Failed to shmget with IPC_PRIVATE, "
@@ -119,6 +120,10 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
                          errno, strerror(errno));
                 return UCC_ERR_NO_MESSAGE;
             }
+            team->a2av = shmat(shm_id, NULL, 0);
+            shmctl(shm_id, IPC_RMID, NULL);
+            memset(team->a2av, 0, control_size);
+
         }
 
         for (i = 0; i < MAX_ALLTOALLV_CONCURRENT; i++) {
@@ -142,13 +147,12 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
         team->oob.req_free(req);
         shm_id = shm_ids[NODE_LEADER_RANK(team)];
         ucc_free(shm_ids);
-        team->a2av = shmat(shm_id, NULL, 0);
-        if (team->a2av == (void *) -1) {
-            tl_error(tl_team->context->lib, "Failed to shmat errno:%d(%s)", errno, strerror(errno));
-            return UCC_ERR_NO_MEMORY;
-        }
-        if (IS_NODE_LEADER(team)) {
-            shmctl(shm_id, IPC_RMID, NULL);
+        if (!IS_NODE_LEADER(team)) {
+            team->a2av = shmat(shm_id, NULL, 0);
+            if (team->a2av == (void *) -1) {
+                tl_error(tl_team->context->lib, "Failed to shmat errno:%d(%s)", errno, strerror(errno));
+                return UCC_ERR_NO_MEMORY;
+            }
         }
     }
     tl_info(tl_team->context->lib, "initialized tl team: %p", team);
