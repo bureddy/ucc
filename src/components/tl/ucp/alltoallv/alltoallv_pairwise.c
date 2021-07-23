@@ -153,8 +153,6 @@ ucs_status_t ucc_tl_ucp_alltoallv_cuda_ipc_setup(ucc_coll_task_t *coll_task)
         CUDACHECK(cudaIpcGetMemHandle((cudaIpcMemHandle_t *) &my_info->handle, base_address));
     }
 
-    CUDACHECK(cudaEventRecord(team->event[coll_id], (cudaStream_t)coll_task->ee->ee_context));
-    my_info->ev_handle = team->ipc_event_handle[coll_id];
     my_info->d_ptr  = base_address;
     my_info->size   = alloc_length;
     my_info->offset = task->args.src.info_v.buffer - base_address;
@@ -162,6 +160,8 @@ ucs_status_t ucc_tl_ucp_alltoallv_cuda_ipc_setup(ucc_coll_task_t *coll_task)
     for (i = intra_rank_start, j = 0; i <= intra_rank_end; i++, j++) {
         my_info->displ[j] =  ucc_coll_args_get_displacement(&task->args,
                 task->args.src.info_v.displacements,i) * sdt_size;
+        my_info->ev_handle[j] = team->ipc_event_handle[coll_id][j];
+        CUDACHECK(cudaEventRecord(team->event[coll_id][j], (cudaStream_t)coll_task->ee->ee_context));
     }
 
     __sync_synchronize();
@@ -188,8 +188,8 @@ ucs_status_t ucc_tl_ucp_alltoallv_cuda_ipc_setup(ucc_coll_task_t *coll_task)
         }
 
         if(i != team->rank) {
-            if (team->ipc_event[j][coll_id] == (cudaEvent_t) NULL) {
-                CUDACHECK(cudaIpcOpenEventHandle(&team->ipc_event[j][coll_id], peer_info[j].ev_handle));
+            if (team->ipc_event[coll_id][j] == (cudaEvent_t) NULL) {
+                CUDACHECK(cudaIpcOpenEventHandle(&team->ipc_event[coll_id][j], peer_info[j].ev_handle[team->rank-intra_rank_start]));
             }
         }
     }
@@ -208,7 +208,7 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_early_triggered_post(ucc_coll_task_t 
     ucc_rank_t intra_rank_start = ucs_align_down(team->rank, INTRA_PPN);
     ucc_rank_t intra_rank_end   = ucs_min(intra_rank_start + INTRA_PPN, team->size) - 1;
     ucc_rank_t intra_rank       = team->rank - intra_rank_start;
-    size_t   rdt_size, data_size, data_displ, ipc_thresh;
+    size_t   rdt_size, sdt_size, data_size, data_displ, ipc_thresh;
     int rank, i, j, peer;
     mem_info_t *peer_info, *my_info;
     ptrdiff_t src;
@@ -221,6 +221,7 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_early_triggered_post(ucc_coll_task_t 
 
     ipc_thresh = UCC_TL_UCP_TEAM_CTX(team)->cfg.alltoallv_ipc_thresh;
     rdt_size = ucc_dt_size(task->args.dst.info_v.datatype);
+    sdt_size = ucc_dt_size(task->args.src.info_v.datatype);
     for (j=0; j < INTRA_PPN; j++) {
         rank = team->rank + j;
         if (rank > intra_rank_end) {
@@ -250,9 +251,14 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_early_triggered_post(ucc_coll_task_t 
         if (data_size != 0) {
             if (rank != team->rank) {
                 CUDACHECK(cudaStreamWaitEvent((cudaStream_t)coll_task->ee->ee_context,
-                                team->ipc_event[peer][task->alltoall_intra.coll_id], 0));
+                                team->ipc_event[task->alltoall_intra.coll_id][peer], 0));
             }
+
             CUDACHECK(cudaMemcpyAsync((void *)(rbuf + data_displ), (void *)src, data_size, cudaMemcpyDeviceToDevice, (cudaStream_t)coll_task->ee->ee_context));
+
+            if (rank != team->rank) {
+                CUDACHECK(cudaEventRecord(team->ipc_event[task->alltoall_intra.coll_id][peer], (cudaStream_t)coll_task->ee->ee_context));
+            }
         }
         task->alltoall_intra.n++;
     }
@@ -260,7 +266,6 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_early_triggered_post(ucc_coll_task_t 
     peer_info = &team->a2av[NODE_GROUP_SIZE * task->alltoall_intra.coll_id];
     my_info = &peer_info[NODE_RANK(team)];
 
-    CUDACHECK(cudaEventRecord(team->event[task->alltoall_intra.coll_id], (cudaStream_t)coll_task->ee->ee_context));
 
     __sync_synchronize();
     asm volatile("": : :"memory");
@@ -274,7 +279,11 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_early_triggered_post(ucc_coll_task_t 
     for (i=intra_rank_start,j = 0 ; i <= intra_rank_end; i++, j++) {
         peer_info = &((mem_info_t *)task->alltoall_intra.info)[j];
         if (i != team->rank) {
-            CUDACHECK(cudaStreamWaitEvent((cudaStream_t)coll_task->ee->ee_context, team->ipc_event[j][task->alltoall_intra.coll_id], 0));
+            data_size  = ucc_coll_args_get_count(&task->args,
+                            task->args.src.info_v.counts, i) * sdt_size;
+            if (data_size != 0) {
+                CUDACHECK(cudaStreamWaitEvent((cudaStream_t)coll_task->ee->ee_context, team->event[task->alltoall_intra.coll_id][j], 0));
+            }
         }
     }
 

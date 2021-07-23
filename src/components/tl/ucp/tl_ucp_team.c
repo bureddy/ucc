@@ -121,19 +121,26 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
                 return UCC_ERR_NO_MESSAGE;
             }
             team->a2av = shmat(shm_id, NULL, 0);
+            if (team->a2av == (void *) -1) {
+                tl_error(tl_team->context->lib, "Failed to shmat errno:%d(%s)", errno, strerror(errno));
+                return UCC_ERR_NO_MEMORY;
+            }
             shmctl(shm_id, IPC_RMID, NULL);
             memset(team->a2av, 0, control_size);
 
         }
 
         for (i = 0; i < MAX_ALLTOALLV_CONCURRENT; i++) {
-            CUDACHECK(cudaEventCreateWithFlags(&team->event[i], cudaEventDisableTiming | cudaEventInterprocess));
-            CUDACHECK(cudaIpcGetEventHandle((cudaIpcEventHandle_t *)&team->ipc_event_handle[i], team->event[i]));
+            for (j = 0; j < NODE_GROUP_SIZE; j++) {
+                CUDACHECK(cudaEventCreateWithFlags(&team->event[i][j], cudaEventDisableTiming | cudaEventInterprocess));
+                CUDACHECK(cudaIpcGetEventHandle((cudaIpcEventHandle_t *)&team->ipc_event_handle[i][j], team->event[i][j]));
+
+            }
 
         }
 
-        for (i = 0; i < NODE_GROUP_SIZE; i++) {
-            for (j = 0; j < MAX_ALLTOALLV_CONCURRENT; j++) {
+        for (i = 0; i < MAX_ALLTOALLV_CONCURRENT; i++) {
+            for (j = 0; j < NODE_GROUP_SIZE; j++) {
                 team->ipc_event[i][j] = (cudaEvent_t) NULL;
             }
         }

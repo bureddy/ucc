@@ -62,7 +62,7 @@ typedef struct {
     void  *d_ptr;
     size_t size;
     cudaIpcMemHandle_t handle;
-    cudaIpcEventHandle_t ev_handle;
+    cudaIpcEventHandle_t ev_handle[INTRA_PPN];
     size_t offset;
     size_t displ[INTRA_PPN];
     uint32_t seq_num[2];
@@ -138,9 +138,9 @@ typedef struct ucc_tl_ucp_team {
     uint32_t                   seq_num;
     ucc_tl_ucp_task_t         *preconnect_task;
     mem_info_t                *a2av;
-    cudaEvent_t                event[MAX_ALLTOALLV_CONCURRENT];
-    cudaIpcEventHandle_t       ipc_event_handle[MAX_ALLTOALLV_CONCURRENT];
-    cudaEvent_t                ipc_event[NODE_GROUP_SIZE][MAX_ALLTOALLV_CONCURRENT];
+    cudaEvent_t                event[MAX_ALLTOALLV_CONCURRENT][NODE_GROUP_SIZE];
+    cudaIpcEventHandle_t       ipc_event_handle[MAX_ALLTOALLV_CONCURRENT][NODE_GROUP_SIZE];
+    cudaEvent_t                ipc_event[MAX_ALLTOALLV_CONCURRENT][NODE_GROUP_SIZE];
     ucc_team_oob_coll_t        oob;
 } ucc_tl_ucp_team_t;
 UCC_CLASS_DECLARE(ucc_tl_ucp_team_t, ucc_base_context_t *,
