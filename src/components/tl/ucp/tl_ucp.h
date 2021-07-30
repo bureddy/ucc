@@ -58,13 +58,20 @@
 #define NODE_RANK(_team) ((_team)->rank % NODE_GROUP_SIZE)
 #define NODE_LEADER_RANK(_team) ((_team)->rank - NODE_RANK(_team))
 #define IS_RANK_LOCAL(_team, _rank) (((_team)->rank / NODE_GROUP_SIZE) == ((_rank) / NODE_GROUP_SIZE))
+
 typedef struct {
     void  *d_ptr;
     size_t size;
     cudaIpcMemHandle_t handle;
-    cudaIpcEventHandle_t ev_handle[INTRA_PPN];
     size_t offset;
     size_t displ[INTRA_PPN];
+    size_t length[INTRA_PPN];
+} minfo_t;
+
+typedef struct {
+    minfo_t src;
+    minfo_t dst;
+    cudaIpcEventHandle_t ev_handle[INTRA_PPN];
     uint32_t seq_num[2];
 } mem_info_t;
 
@@ -97,6 +104,7 @@ typedef struct ucc_tl_ucp_context_config {
     uint32_t                alltoall_use_ipc;
     size_t                  alltoallv_ipc_thresh;
     uint32_t                alltoallv_ipc_overlap;
+    uint32_t                cube_mesh_nvlink;
 } ucc_tl_ucp_context_config_t;
 
 typedef struct ucc_tl_ucp_lib {

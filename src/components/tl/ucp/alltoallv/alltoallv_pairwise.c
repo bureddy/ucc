@@ -14,6 +14,30 @@
 #include "core/ucc_mc.h"
 #include "cuda_runtime.h"
 
+#define DGX1 1
+
+#if DGX1
+
+/* local group. 3rd bit is same*/
+#define IS_NVLINK_PROXY_SRC(_rank1, _rank2) \
+        ((_rank1 != _rank2) && ((_rank1 & 0x4) == (_rank2 & 0x4)))
+
+/* flip 3rd bit */
+#define NVLINK_PROXY_TARGET(_rank) (_rank ^ 0x4)
+
+#elif ZIONEX
+/* local group, 2 nd bit is samae*/
+#define IS_NVLINK_PROXY_SRC(_rank1, _rank2) \
+        ((_rank1 != _rank2) && ((_rank1 & 0x4) == (_rank2 & 0x4)))
+
+/*flip 2,3 rd bits*/
+#define NVLINK_PROXY_TARGET(_rank) (_rank ^ 0x6)
+
+#endif
+
+#define IS_NVLINK_ACCEESSIBLE(_rank1, _rank2, _is_cube_mesh_nvlink) \
+        (!_is_cube_mesh_nvlink || ((IS_NVLINK_PROXY_SRC(_rank1, _rank2)) || (NVLINK_PROXY_TARGET(_rank1) == _rank2)))
+
 static inline ucc_rank_t get_recv_peer(ucc_rank_t rank, ucc_rank_t size,
                                        ucc_rank_t step)
 {
@@ -37,13 +61,15 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_progress(ucc_coll_task_t *coll_task)
     ucc_rank_t         grank = team->rank;
     ucc_rank_t         gsize = team->size;
     int                polls = 0;
-    uint32_t           to_post = gsize;
+    uint32_t           to_send_post = gsize;
+    uint32_t           to_recv_post = gsize;
     ucc_rank_t         peer;
     int                posts, nreqs;//, count_stride, displ_stride;
     size_t             rdt_size, sdt_size, data_size, data_displ, ipc_thresh;
 
     if (task->alltoall_intra.info) {
-        to_post -= task->alltoall_intra.n;
+        to_send_post -= task->alltoall_intra.send_posted;
+        to_recv_post -= task->alltoall_intra.recv_posted;
     }
 
     ipc_thresh = UCC_TL_UCP_TEAM_CTX(team)->cfg.alltoallv_ipc_thresh;
@@ -61,7 +87,7 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_progress(ucc_coll_task_t *coll_task)
                 ucc_coll_args_get_count(
                     &coll_task->args, coll_task->args.dst.info_v.counts, peer) *
                 rdt_size;
-            if (IS_RANK_LOCAL(team, peer) && data_size >= ipc_thresh && to_post != gsize) {
+            if (IS_RANK_LOCAL(team, peer) && data_size >= ipc_thresh && to_recv_post != gsize) {
                 task->recv_posted++;
                 task->recv_completed++;
                 continue;
@@ -85,7 +111,7 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_progress(ucc_coll_task_t *coll_task)
                 ucc_coll_args_get_count(
                     &coll_task->args, coll_task->args.src.info_v.counts, peer) *
                 sdt_size;
-            if (IS_RANK_LOCAL(team, peer) && data_size >= ipc_thresh && to_post != gsize) {
+            if (IS_RANK_LOCAL(team, peer) && data_size >= ipc_thresh && to_send_post != gsize) {
                 task->send_posted++;
                 task->send_completed++;
                 continue;
@@ -131,8 +157,12 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_start(ucc_coll_task_t *coll_task)
 
 ucs_status_t ucc_tl_ucp_alltoallv_cuda_ipc_setup(ucc_coll_task_t *coll_task)
 {
-    ucc_tl_ucp_task_t *task = ucc_derived_of(coll_task, ucc_tl_ucp_task_t);
-    ucc_tl_ucp_team_t *team = TASK_TEAM(task);
+    ucc_tl_ucp_task_t *task     = ucc_derived_of(coll_task, ucc_tl_ucp_task_t);
+    ucc_tl_ucp_team_t *team     = TASK_TEAM(task);
+    ucc_rank_t intra_rank_start = ucs_align_down(team->rank, INTRA_PPN);
+    ucc_rank_t intra_rank_end   = ucs_min(intra_rank_start + INTRA_PPN, team->size) - 1;
+    ucc_rank_t intra_rank       = team->rank-intra_rank_start;
+    int     is_cube_mesh_nvlink = UCC_TL_UCP_TEAM_CTX(team)->cfg.cube_mesh_nvlink;
     ucc_status_t status;
     void *base_address;
     size_t alloc_length, sdt_size, rdt_size, ipc_thresh;
@@ -141,8 +171,8 @@ ucs_status_t ucc_tl_ucp_alltoallv_cuda_ipc_setup(ucc_coll_task_t *coll_task)
     mem_info_t *peer_info;
     void *mapped_addr;
     size_t total_counts;
-    ucc_rank_t intra_rank_start = ucs_align_down(team->rank, INTRA_PPN);
-    ucc_rank_t intra_rank_end   = ucs_min(intra_rank_start + INTRA_PPN, team->size) - 1;
+    char aa[512], bb[512];
+    char *a = aa, *b =bb;
 
     ipc_thresh = UCC_TL_UCP_TEAM_CTX(team)->cfg.alltoallv_ipc_thresh;
     coll_id = (task->tag % MAX_ALLTOALLV_CONCURRENT);
@@ -154,21 +184,42 @@ ucs_status_t ucc_tl_ucp_alltoallv_cuda_ipc_setup(ucc_coll_task_t *coll_task)
 
     total_counts = ucc_coll_args_get_total_count(&coll_task->args, coll_task->args.src.info_v.counts, team->size);
     ucc_tl_ucp_get_alloc_info(coll_task->args.src.info_v.buffer, total_counts * sdt_size,  &base_address, &alloc_length);
-
     if (base_address != NULL) {
-        CUDACHECK(cudaIpcGetMemHandle((cudaIpcMemHandle_t *) &my_info->handle, base_address));
+        CUDACHECK(cudaIpcGetMemHandle((cudaIpcMemHandle_t *) &my_info->src.handle, base_address));
     }
+    my_info->src.d_ptr  = base_address;
+    my_info->src.size   = alloc_length;
+    my_info->src.offset = coll_task->args.src.info_v.buffer - base_address;
 
-    my_info->d_ptr  = base_address;
-    my_info->size   = alloc_length;
-    my_info->offset = coll_task->args.src.info_v.buffer - base_address;
+    total_counts = ucc_coll_args_get_total_count(&coll_task->args, coll_task->args.dst.info_v.counts, team->size);
+    ucc_tl_ucp_get_alloc_info(coll_task->args.dst.info_v.buffer, total_counts * rdt_size,  &base_address, &alloc_length);
+    if (base_address != NULL) {
+        CUDACHECK(cudaIpcGetMemHandle((cudaIpcMemHandle_t *) &my_info->dst.handle, base_address));
+    }
+    my_info->dst.d_ptr  = base_address;
+    my_info->dst.size   = alloc_length;
+    my_info->dst.offset = coll_task->args.dst.info_v.buffer - base_address;
 
+    a += sprintf(a, "[ %d : ", intra_rank);
+    b += sprintf(b, "[ %d : ", intra_rank);
     for (i = intra_rank_start, j = 0; i <= intra_rank_end; i++, j++) {
-        my_info->displ[j] =  ucc_coll_args_get_displacement(&coll_task->args,
+
+        my_info->src.displ[j] =  ucc_coll_args_get_displacement(&coll_task->args,
                 coll_task->args.src.info_v.displacements,i) * sdt_size;
+        my_info->src.length[j]  = ucc_coll_args_get_count(&coll_task->args,
+                            coll_task->args.src.info_v.counts, i) * sdt_size;
+        a += sprintf(a, "  %5ld ", my_info->src.length[j]);
+        my_info->dst.displ[j] =  ucc_coll_args_get_displacement(&coll_task->args,
+                coll_task->args.dst.info_v.displacements,i) * rdt_size;
+        my_info->dst.length[j]  = ucc_coll_args_get_count(&coll_task->args,
+                            coll_task->args.dst.info_v.counts, i) * rdt_size;
+        b += sprintf(b, "  %5ld ", my_info->dst.length[j]);
         my_info->ev_handle[j] = team->ipc_event_handle[coll_id][j];
         CUDACHECK(cudaEventRecord(team->event[coll_id][j], (cudaStream_t)coll_task->ee->ee_context));
     }
+
+    tl_debug(UCC_TL_TEAM_LIB(team), "SEND LEN: %s", aa);
+    tl_debug(UCC_TL_TEAM_LIB(team), "RECV LEN: %s", bb);
 
     __sync_synchronize();
     asm volatile("": : :"memory");
@@ -179,23 +230,39 @@ ucs_status_t ucc_tl_ucp_alltoallv_cuda_ipc_setup(ucc_coll_task_t *coll_task)
         while (pi[j].seq_num[0] != (task->tag + 1));
     }
     for (i=intra_rank_start,j = 0 ; i <= intra_rank_end; i++, j++) {
-        if (i != team->rank && peer_info[j].d_ptr &&
-                (ucc_coll_args_get_count(&coll_task->args, coll_task->args.dst.info_v.counts, i) *
-                 rdt_size) >= ipc_thresh) {
-            status = ucc_cuda_ipc_map_memhandle(peer_info[j].d_ptr, peer_info[j].size,
-                    peer_info[j].handle, &mapped_addr,
-                    UCC_TL_UCP_TEAM_CTX(team)->ipc_cache[j]);
-            if (UCC_OK != status) {
-                ucc_error("ucc_cuda_ipc_map_memhandle failed");
-                return UCC_ERR_INVALID_PARAM;
-            }
+        if (i != team->rank) {
             ucc_assert(j < INTRA_PPN);
-            task->alltoall_intra.peer_map_addr[j] = mapped_addr;
+
+            if (IS_NVLINK_ACCEESSIBLE(j, intra_rank, is_cube_mesh_nvlink) &&
+                    ((peer_info[intra_rank].dst.length[j] > ipc_thresh) ||
+                     (is_cube_mesh_nvlink && peer_info[NVLINK_PROXY_TARGET(intra_rank)].dst.length[j] > ipc_thresh))) {
+
+                status = ucc_cuda_ipc_map_memhandle(peer_info[j].src.d_ptr, peer_info[j].src.size,
+                        peer_info[j].src.handle, &mapped_addr,
+                        UCC_TL_UCP_TEAM_CTX(team)->ipc_cache[j]);
+                if (UCC_OK != status) {
+                    ucc_error("ucc_cuda_ipc_map_memhandle failed");
+                    return UCC_ERR_INVALID_PARAM;
+                }
+                task->alltoall_intra.peer_src_map_addr[j] = mapped_addr;
+            }
+
+            if (is_cube_mesh_nvlink && (NVLINK_PROXY_TARGET(intra_rank) == j)) {
+                status = ucc_cuda_ipc_map_memhandle(peer_info[j].dst.d_ptr, peer_info[j].dst.size,
+                        peer_info[j].dst.handle, &mapped_addr,
+                        UCC_TL_UCP_TEAM_CTX(team)->ipc_cache[j]);
+                if (UCC_OK != status) {
+                    ucc_error("ucc_cuda_ipc_map_memhandle failed");
+                    return UCC_ERR_INVALID_PARAM;
+                }
+                task->alltoall_intra.peer_dst_map_addr[j] = mapped_addr;
+            }
+
         }
 
         if(i != team->rank) {
             if (team->ipc_event[coll_id][j] == (cudaEvent_t) NULL) {
-                CUDACHECK(cudaIpcOpenEventHandle(&team->ipc_event[coll_id][j], peer_info[j].ev_handle[team->rank-intra_rank_start]));
+                CUDACHECK(cudaIpcOpenEventHandle(&team->ipc_event[coll_id][j], peer_info[j].ev_handle[intra_rank]));
             }
         }
     }
@@ -206,20 +273,36 @@ ucs_status_t ucc_tl_ucp_alltoallv_cuda_ipc_setup(ucc_coll_task_t *coll_task)
     return UCC_OK;
 }
 
+#define IPC_GET_ALLTOALLV_SEND_BUF_INFO(_task, _addr, _size, _rank, _target) \
+{                                                                               \
+    mem_info_t *info = &((mem_info_t *)_task->alltoall_intra.info)[_rank]; \
+    _addr = (ptrdiff_t) _task->alltoall_intra.peer_src_map_addr[_rank] + info->src.offset + info->src.displ[_target]; \
+    _size = info->src.length[_target]; \
+}
+
+#define IPC_GET_ALLTOALLV_RECV_BUF_INFO(_task, _addr, _size, _rank, _target) \
+{                                                                               \
+    mem_info_t *info = &((mem_info_t *)_task->alltoall_intra.info)[_rank]; \
+    _addr = (ptrdiff_t) _task->alltoall_intra.peer_dst_map_addr[_rank] + info->dst.offset + info->dst.displ[_target]; \
+    _size = info->dst.length[_target];    \
+}
+
 ucc_status_t ucc_tl_ucp_alltoallv_pairwise_early_triggered_post(ucc_coll_task_t *coll_task)
 {
-    ucc_tl_ucp_task_t *task = ucc_derived_of(coll_task, ucc_tl_ucp_task_t);
-    ucc_tl_ucp_team_t *team  = TASK_TEAM(task);
-    ptrdiff_t          rbuf  = (ptrdiff_t)coll_task->args.dst.info_v.buffer;
+    ucc_tl_ucp_task_t *task     = ucc_derived_of(coll_task, ucc_tl_ucp_task_t);
+    ucc_tl_ucp_team_t *team     = TASK_TEAM(task);
+    ptrdiff_t          rbuf     = (ptrdiff_t)coll_task->args.dst.info_v.buffer;
     ucc_rank_t intra_rank_start = ucs_align_down(team->rank, INTRA_PPN);
     ucc_rank_t intra_rank_end   = ucs_min(intra_rank_start + INTRA_PPN, team->size) - 1;
     ucc_rank_t intra_rank       = team->rank - intra_rank_start;
+    int     is_cube_mesh_nvlink = UCC_TL_UCP_TEAM_CTX(team)->cfg.cube_mesh_nvlink;
     size_t   rdt_size, sdt_size, data_size, data_displ, ipc_thresh;
     int rank, i, j, peer;
     mem_info_t *peer_info, *my_info;
-    ptrdiff_t src;
+    ptrdiff_t src, dst;
 
-    task->alltoall_intra.n = 0;
+    task->alltoall_intra.send_posted = 0;
+    task->alltoall_intra.recv_posted = 0;
     if (!UCC_TL_UCP_TEAM_CTX(team)->cfg.alltoall_use_ipc) {
         return UCC_OK;
     }
@@ -228,6 +311,8 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_early_triggered_post(ucc_coll_task_t 
     ipc_thresh = UCC_TL_UCP_TEAM_CTX(team)->cfg.alltoallv_ipc_thresh;
     rdt_size = ucc_dt_size(coll_task->args.dst.info_v.datatype);
     sdt_size = ucc_dt_size(coll_task->args.src.info_v.datatype);
+
+    /* Direct copy over NVLINK */
     for (j=0; j < INTRA_PPN; j++) {
         rank = team->rank + j;
         if (rank > intra_rank_end) {
@@ -236,37 +321,55 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_early_triggered_post(ucc_coll_task_t 
         peer = rank - intra_rank_start;
         peer_info = &((mem_info_t *)task->alltoall_intra.info)[peer];
 
-
         if (rank == team->rank) {
             src = (ptrdiff_t)coll_task->args.src.info_v.buffer +
-                    + peer_info->displ[intra_rank];
+                    + peer_info->src.displ[intra_rank];
         } else {
-            src = (ptrdiff_t) task->alltoall_intra.peer_map_addr[peer] +
-                    peer_info->offset + peer_info->displ[intra_rank];
+            src = (ptrdiff_t) task->alltoall_intra.peer_src_map_addr[peer] +
+                    peer_info->src.offset + peer_info->src.displ[intra_rank];
         }
 
         data_size  = ucc_coll_args_get_count(&coll_task->args,
                             coll_task->args.dst.info_v.counts, rank) * rdt_size;
-        if (data_size < ipc_thresh) {
+        if (data_size < ipc_thresh && rank != team->rank) {
             continue;
         }
         data_displ = ucc_coll_args_get_displacement(&coll_task->args,
                             coll_task->args.dst.info_v.displacements, rank)* rdt_size;
 
-        //printf("SNED [%d: %d] sdispl:%ld rdispl:(%ld:%ld) size:%ld \n", team->rank, rank, data_displ, peer_info->offset, peer_info->displ[intra_rank], data_size);
         if (data_size != 0) {
-            if (rank != team->rank) {
+            if (rank == team->rank) {
+                CUDACHECK(cudaMemcpyAsync((void *)(rbuf + data_displ), (void *)src, data_size, cudaMemcpyDeviceToDevice, (cudaStream_t)coll_task->ee->ee_context));
+            } else if (IS_NVLINK_ACCEESSIBLE(peer, intra_rank, is_cube_mesh_nvlink)) {
                 CUDACHECK(cudaStreamWaitEvent((cudaStream_t)coll_task->ee->ee_context,
-                                team->ipc_event[task->alltoall_intra.coll_id][peer], 0));
-            }
+                            team->ipc_event[task->alltoall_intra.coll_id][peer], 0));
 
-            CUDACHECK(cudaMemcpyAsync((void *)(rbuf + data_displ), (void *)src, data_size, cudaMemcpyDeviceToDevice, (cudaStream_t)coll_task->ee->ee_context));
+                CUDACHECK(cudaMemcpyAsync((void *)(rbuf + data_displ), (void *)src, data_size, cudaMemcpyDeviceToDevice, (cudaStream_t)coll_task->ee->ee_context));
 
-            if (rank != team->rank) {
-                CUDACHECK(cudaEventRecord(team->ipc_event[task->alltoall_intra.coll_id][peer], (cudaStream_t)coll_task->ee->ee_context));
+                if (!is_cube_mesh_nvlink) {
+                    CUDACHECK(cudaEventRecord(team->ipc_event[task->alltoall_intra.coll_id][peer], (cudaStream_t)coll_task->ee->ee_context));
+                }
             }
         }
-        task->alltoall_intra.n++;
+    }
+
+    /* Indirect copies over NVLINK */
+    if (is_cube_mesh_nvlink) {
+        int dst_peer, src_peer;
+        size_t s_data_size, d_data_size;
+        dst_peer = NVLINK_PROXY_TARGET(intra_rank);
+        for (src_peer = 0; src_peer < INTRA_PPN; src_peer++) {
+            if (IS_NVLINK_PROXY_SRC(src_peer, intra_rank)) {
+                IPC_GET_ALLTOALLV_SEND_BUF_INFO(task, src, s_data_size, src_peer, dst_peer);
+                IPC_GET_ALLTOALLV_RECV_BUF_INFO(task, dst, d_data_size, dst_peer, src_peer);
+                ucc_assert(s_data_size == d_data_size);
+                if (s_data_size != 0 && s_data_size >= ipc_thresh) {
+                    CUDACHECK(cudaMemcpyAsync((void *)dst, (void *)src, s_data_size, cudaMemcpyDeviceToDevice, (cudaStream_t)coll_task->ee->ee_context));
+                }
+                CUDACHECK(cudaEventRecord(team->ipc_event[task->alltoall_intra.coll_id][src_peer], (cudaStream_t)coll_task->ee->ee_context));
+            }
+            CUDACHECK(cudaEventRecord(team->ipc_event[task->alltoall_intra.coll_id][dst_peer], (cudaStream_t)coll_task->ee->ee_context));
+        }
     }
 
     peer_info = &team->a2av[NODE_GROUP_SIZE * task->alltoall_intra.coll_id];
@@ -284,15 +387,31 @@ ucc_status_t ucc_tl_ucp_alltoallv_pairwise_early_triggered_post(ucc_coll_task_t 
 
     for (i=intra_rank_start,j = 0 ; i <= intra_rank_end; i++, j++) {
         peer_info = &((mem_info_t *)task->alltoall_intra.info)[j];
-        if (i != team->rank) {
-            data_size  = ucc_coll_args_get_count(&coll_task->args,
-                            coll_task->args.src.info_v.counts, i) * sdt_size;
-            if (data_size != 0) {
+        if (!is_cube_mesh_nvlink) {
+            if (i != team->rank) {
+                data_size  = ucc_coll_args_get_count(&coll_task->args,
+                        coll_task->args.src.info_v.counts, i) * sdt_size;
+                if (data_size != 0) {
+                    CUDACHECK(cudaStreamWaitEvent((cudaStream_t)coll_task->ee->ee_context, team->event[task->alltoall_intra.coll_id][j], 0));
+                }
+            }
+        } else {
+            if (IS_NVLINK_ACCEESSIBLE(j, intra_rank, 1)) {
                 CUDACHECK(cudaStreamWaitEvent((cudaStream_t)coll_task->ee->ee_context, team->event[task->alltoall_intra.coll_id][j], 0));
             }
         }
-    }
 
+        if (j != intra_rank) {
+            if (peer_info->src.length[j] >= ipc_thresh) task->alltoall_intra.send_posted++;
+            if (peer_info->dst.length[j] >= ipc_thresh) task->alltoall_intra.recv_posted++;
+
+        } else {
+            task->alltoall_intra.send_posted++;
+            task->alltoall_intra.recv_posted++;
+        }
+
+
+    }
 
     return UCC_OK;
 }

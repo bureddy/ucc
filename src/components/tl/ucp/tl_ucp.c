@@ -98,6 +98,11 @@ static ucs_config_field_t ucc_tl_ucp_context_config_table[] = {
      ucc_offsetof(ucc_tl_ucp_context_config_t, alltoall_use_ipc),
      UCC_CONFIG_TYPE_UINT},
 
+    {"CUBE_MESH_NVLINK", "0",
+     "NVLINK topology is CUBE-MESH",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, cube_mesh_nvlink),
+     UCC_CONFIG_TYPE_UINT},
+
     {"ALLTOALLV_IPC_THRESH", "0",
      "Use IPC if data size exceeds the thresh",
      ucc_offsetof(ucc_tl_ucp_context_config_t, alltoallv_ipc_thresh),
