@@ -54,9 +54,11 @@ typedef struct ucc_tl_ucp_task {
         } bcast_kn;
         struct {
             void                   *info;
-            void                   *peer_map_addr[8];
+            void                   *peer_src_map_addr[8];
+            void                   *peer_dst_map_addr[8];
             uint32_t                coll_id;
-            uint32_t                n;
+            int                     send_posted;
+            int                     recv_posted;
         } alltoall_intra;
     };
 } ucc_tl_ucp_task_t;
