@@ -109,6 +109,10 @@ typedef struct ucc_tl_sharp_task {
             ucc_tl_sharp_reg_t *r_mem_h;
         } allreduce;
         struct {
+            ucc_tl_sharp_reg_t *s_mem_h;
+            ucc_tl_sharp_reg_t *r_mem_h;
+        } reduce_scatter;
+        struct {
             ucc_tl_sharp_reg_t *mem_h;
         } bcast;
     };
